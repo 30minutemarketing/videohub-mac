@@ -125,6 +125,16 @@ test('macOS disk information shares df byte conversion and Stop handles the full
   await h.killTree(100); assert.deepEqual(h.delays, [3000]); assert.deepEqual(h.signals, [[-100, 'SIGTERM'], [101, 'SIGTERM'], [100, 'SIGTERM'], [-100, 'SIGKILL'], [101, 'SIGKILL'], [100, 'SIGKILL']]);
 });
 
+test('macOS Stop also kills processes a surviving render started after SIGTERM', async () => {
+  // first snapshot: node render.js + ffmpeg; after SIGTERM node survives and has launched a new browser with a helper
+  let lists = 0;
+  const before = '100 7 2048 Fri Nov 13 10:20:30 2026 node\n101 100 300 Fri Nov 13 10:20:31 2026 ffmpeg\n';
+  const after = '100 7 2048 Fri Nov 13 10:20:30 2026 node\n102 100 900 Fri Nov 13 10:20:40 2026 Google Chrome\n103 102 400 Fri Nov 13 10:20:41 2026 Google Chrome Helper\n55 1 100 Fri Nov 13 09:00:00 2026 unrelated\n';
+  const h = harness({ answer: (file, args) => ({ code: 0, stdout: args.at(-1).includes('lstart') ? (lists++ ? after : before) : '', stderr: '' }) });
+  await h.killTree(100);
+  assert.deepEqual(h.signals, [[-100, 'SIGTERM'], [101, 'SIGTERM'], [100, 'SIGTERM'], [-100, 'SIGKILL'], [100, 'SIGKILL'], [103, 'SIGKILL'], [102, 'SIGKILL']]);
+});
+
 test('macOS LaunchAgent autostart requires an owned plist and loaded service and disables by bootout plus Trash', async () => {
   const file = '/Users/me/Library/LaunchAgents/com.videohub.hub.plist', h = harness({ hubDir: '/opt/VideoHub & review' });
   assert.equal(await h.getAutostart(), false); await h.setAutostart(true);

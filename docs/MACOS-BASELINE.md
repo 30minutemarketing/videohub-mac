@@ -98,8 +98,82 @@ The test requires `open.vbs` and `open.ps1` to be absent. Both are still tracked
 - `gpus` is empty on Apple Silicon (expected: no discrete GPU list). VideoToolbox detection doesn't depend on it.
 - `claude` and `opencode` CLIs are not on `PATH` (Claude Code runs inside the desktop app). A real setup would fall back to editing `~/.claude.json`. Settle this before A3.
 
-## Not yet verified (requires the live hub)
-Example-film live preview, frame notes, full MP4 with audio, partial re-render and actual VideoToolbox encoding. See the plan below.
+## A0 run 2: live hub, preview and notes (2026-11-15)
+Isolated test hub: `VIDEOHUB_PORT=7799`, data, workspace and a copy of `hello-film` under `.test-tmp/a0-live`, `VIDEOHUB_GUARD=off`, `VIDEOHUB_JOBS=off`. The test hub's config listed only the scratch films folder, so real Desktop/Documents folders were not scanned.
+
+| Check | Result |
+|---|---|
+| Hub startup | **Pass.** Listening on `127.0.0.1:7799` only. |
+| Foreign `Host` header | **Pass.** `403`. |
+| `hub_workspace`, `hub_project` | **Pass.** Example found as chunked (partial re-renders available), 30 fps, 10 s. |
+| `hub_live` opens window | **Pass.** VideoHub opened a Chrome `--app` window on macOS; film page, `film.js` and `audio/mix.wav` (882 KB) served `200`; Chrome connected. |
+| Owner watched preview with audio | **Pass** (owner reviewed and left notes). |
+| Frame notes | **Pass.** Owner left 3 notes (frames 129, 129, 244); saved with frame, crop and annotation JPEGs in the film's `.videohub/`; read back through `hub_notes`. |
+| Fix code, live reload, `hub_note_update` | **Pass** for code edit and status updates (all 3 marked fixed with replies). Owner confirmed the open preview reloaded by itself. |
+
+### Bug: Windows path separators in tool text on macOS
+`hub_workspace` prints `films\<film-name>` and `templates\new-film` on macOS (`server/tools.js`, hard-coded `\\`). Display text only; real paths are correct. Fix: use `path.join` or `path.sep`.
+
+## A0 run 3: full render (2026-11-15)
+Test hub restarted with the job queue on (`VIDEOHUB_JOBS` unset), still `VIDEOHUB_GUARD=off` and scratch data. Owner requested the render after approving the preview.
+
+| Check | Result |
+|---|---|
+| `hub_render` mode `full` through the queue | **Pass.** 5/5 chunks, 300 frames in 4.9 s (60.9 fps); job done in 6 s. |
+| Encoder | **Pass.** Render log `encoder: videotoolbox (h264_videotoolbox)`; MP4 stream tag `h264_videotoolbox`. |
+| Video | **Pass.** H.264 High, 1920x1080, 30 fps, 300 frames, 10.000 s, 1.5 MB. |
+| Audio | **Pass.** AAC LC stereo from `audio/mix.wav` (22,050 Hz, same as source), muxed with `-shortest` and `faststart`. |
+| Fixes present in render | **Pass.** Frames at 5.0 s and 8.2 s show the rectangle, red triangle and "Fix It In Code!". |
+| Outputs folder | **Pass.** Hard-linked into `workspace/outputs/2026-11-15/`. |
+| Process cleanup | **Pass.** No headless Chrome or FFmpeg left from this render (other headless browsers on the machine belong to unrelated tools and predate the run). |
+| RAM advisory | Works on macOS: reported Chrome using 18.9 GB as a suggestion, closed nothing. |
+
+## A0 run 4: partial re-render, cancel, render protection (2026-11-15)
+
+### Partial re-render: **Pass**
+A test change to the outro subtitle (scratch copy only), then `hub_render` mode `partial` with seconds `[[7.8,10]]`:
+- Only chunks 3 and 4 (6–10 s) were re-rendered, 120 frames in 1.9 s with VideoToolbox; job took 3 s.
+- `hello-film_v2.mp4` is 300 frames, 10.000 s. Per-frame MD5 (`framemd5`): frames 0–179 are identical to v1; the first changed frame is 237 (7.9 s, where the subtitle fades in).
+- Decoded audio MD5 is identical between v1 and v2, so the splice keeps audio in sync.
+- A frame at 8.8 s shows the new subtitle.
+
+### Cancel mid-render: **Failed on macOS (bug), fixed in run 5**
+Cancelling (`POST /api/jobs/:id/cancel`) marks the job cancelled and no version is created, but the render does not stop at once:
+1. `killTree` (`server/platform.js`, Unix) sends SIGTERM to the render's process group and each known descendant, waits 3 s, then sends SIGKILL to survivors from the **original** snapshot.
+2. `render.js` uses `puppeteer.launch()` with the default `handleSIGTERM: true`. Puppeteer's handler (`@puppeteer/browsers/lib/launch.js`, `#onDriverProcessSignal`) closes the browser on SIGTERM but **does not exit**; installing the listener also overrides Node's default exit on SIGTERM.
+3. So `render.js` survives SIGTERM, sees FFmpeg die (code 255), retries the chunk, **launches a new Chrome**, and keeps rendering for about 3 s (2–4 more chunks were written after the cancel).
+4. SIGKILL then kills `render.js`, but the new Chrome isn't in the original snapshot, and Puppeteer starts it in its own process group, so it is **orphaned** (reparented to PID 1, still running at +10 s). Reproduced with a 60 s render; the orphan was stopped by hand.
+
+Effects: orphaned headless Chrome processes pile up after each cancel; chunk files in `render/chunks` are rewritten after the user cancelled. Windows is unaffected (`taskkill /T /F` force-kills at once).
+
+Chunks are written to `c_NNN.mp4.tmp.mp4` and renamed when complete, so a cancel never leaves a half-written chunk.
+
+### Render protection (`VIDEOHUB_GUARD` on): **Pass**
+Test hub restarted with `HOME` set to a throwaway folder (protection settings live in `~/Library/Application Support/VideoHub` on macOS), protection on, a 30 s render:
+- `render.js`, its Chrome, and FFmpeg processes started later in the job all ran at nice 10 (low priority) throughout.
+- The job finished normally in 12 s; nothing was written to the fake home (defaults used).
+- macOS has no CPU affinity, as documented; priority and background QoS (`taskpolicy`) are the controls.
+
+## A0 run 5: cancel fix (2026-11-15)
+Changes:
+- `examples/hello-film/render.js` and `templates/new-film/render.js` (still identical): `puppeteer.launch` gets `handleSIGTERM: false, handleSIGHUP: false`, so a stop signal ends the script at once.
+- `server/platform.js` Unix `killTree`: before the SIGKILL pass, also kills survivors' descendants that started after the first snapshot. This covers films that keep an older copy of `render.js`.
+- `server/platform.darwin.test.js`: new test for a child started after SIGTERM (fails without the fix, passes with it).
+
+Results: `npm test` 342 pass, 0 fail, 1 skipped (Windows-only).
+
+| Real cancel test (60 s render, cancel after 4 s) | Before | After |
+|---|---|---|
+| Old `render.js` (existing films) | Ran on ~3 s, new Chrome orphaned | Ran on ~3 s (until SIGKILL); late Chrome killed with it, nothing left |
+| New `render.js` | n/a | All processes gone within 1 s, no retry, no new Chrome |
+
+A normal full render with the new `render.js` still works.
+
+### Note: length inferred from chunks when no length is stored
+A scratch copy made with `cp -R` lacks `.videohub/project.json` (the installer creates it from `videohub-project.json`). `jobs.recipe()` then infers `DUR` from the chunk files on disk, so after a cancel left chunks 0–3, the next full render silently produced 8 s instead of 10 s. With `.videohub/project.json` present, as a real install has, a full render after a cancel resumed correctly (300 frames, 10.000 s). Projects without a stored length (older projects) can still be shortened this way after a cancel; this is a platform-independent edge case to consider upstream.
+
+## A0 summary
+Apple Silicon qualifies for A1. The macOS render-cancel bug found in run 4 is fixed (run 5). Also open: Windows-style path text in `hub_workspace`, 2 moderate `npm audit` advisories, no `.gitignore`.
 
 ## Next: live preview and render acceptance plan (isolated)
 All steps use a scratch copy and test hub, never a real install or `~/Documents/VideoHub`:

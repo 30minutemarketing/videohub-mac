@@ -268,7 +268,9 @@ async function shotChunk(w, a, b, tmp, hold) {
   // 2D canvases are drawn in software: Chromium moves a canvas that is read back often (the raw path) to software
   // drawing anyway, and with both paths on the same rasteriser raw frames and screenshots are pixel-identical (WebGL is
   // not affected)
-  const launch = () => puppeteer.launch({ executablePath: exe, headless: 'new', protocolTimeout: 0, args: ['--allow-file-access-from-files', '--force-device-scale-factor=1', '--hide-scrollbars', '--disable-accelerated-2d-canvas'] });
+  // handleSIGTERM/SIGHUP off: Puppeteer's own handlers close the browser but keep this script alive, so VideoHub's Stop
+  // would let it retry the chunk in a new browser; without them a stop signal ends the script at once
+  const launch = () => puppeteer.launch({ executablePath: exe, headless: 'new', protocolTimeout: 0, handleSIGTERM: false, handleSIGHUP: false, args: ['--allow-file-access-from-files', '--force-device-scale-factor=1', '--hide-scrollbars', '--disable-accelerated-2d-canvas'] });
 
   if (process.argv[2] === 'snap') {
     const br = await launch(), w = await openPage(br, null, 0); fs.mkdirSync('snaps', { recursive: true });

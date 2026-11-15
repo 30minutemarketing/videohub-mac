@@ -476,8 +476,13 @@ function createUnixPlatform({ osName: OS, env, home, temp, fs, os, path, spawn, 
     const after = await processList();
     const same = id => starts.get(id) != null && after?.some(p => p.pid === id && p.start === starts.get(id));
     const surviving = ids.filter(same), root = after?.find(p => p.pid === pid);
+    // a survivor may have started processes after SIGTERM (e.g. a new browser for a retry, in its own process group):
+    // those are absent from the first snapshot, so collect the survivors' current descendants as well
+    const family = new Set(surviving), late = [];
+    for (let n = -1; n !== family.size;) { n = family.size; for (const p of after || []) if (family.has(p.ppid) && !family.has(p.pid)) { family.add(p.pid); if (!starts.has(p.pid)) late.push(p.pid); } }
     if (surviving.length && (!root || same(pid))) try { kill(-pid, 'SIGKILL'); } catch { }
     for (const id of surviving) try { kill(id, 'SIGKILL'); } catch { }
+    for (const id of late.reverse()) try { kill(id, 'SIGKILL'); } catch { }
   }
   const affinity = new Map();
   async function setTreePriority(rootPid, level, cores) {
