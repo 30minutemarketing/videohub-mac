@@ -56,3 +56,63 @@ bash setup.sh --dry-run
 
 ## Change discipline
 Work on `feature/macos-desktop` and use pull requests into `main`. This first commit is documentation only. Do not run setup/install scripts or edit agent configuration until reviewed. Preserve originals and all generated user video assets.
+
+---
+
+# A0 run 1: real Apple Silicon results (2026-11-15)
+
+Run locally on the owner's Mac by Claude Code (desktop app, local session). Logs were kept outside the repository.
+
+## Environment
+| Item | Value |
+|---|---|
+| `uname -m` | `arm64` |
+| macOS | 26.6.2 (build 25G83) |
+| Node / npm | v26.5.0 (Homebrew, native arm64) / 11.17.0 |
+| FFmpeg / ffprobe | 8.1.2 Homebrew, native arm64; `h264_videotoolbox`, `hevc_videotoolbox`, `prores_videotoolbox` present |
+| Browser | Google Chrome at `/Applications/Google Chrome.app` (no Edge or Chromium) |
+| Git HEAD | `89c9c384371c122fae507a6f1626ebc6fd95113a` (`feature/macos-desktop`) |
+| `main` / `origin/main` | `2302ba83581a114f2f41ef094914897fd654c35f` (matches preliminary snapshot) |
+| Remotes | `origin` only, `https://github.com/30minutemarketing/videohub-mac.git`; no `upstream` configured |
+
+## Automated results
+| Command | Result |
+|---|---|
+| `npm ci` | **Pass.** 119 packages. `npm audit`: 2 moderate (transitive `hono`, `@hono/node-server` via the MCP SDK); `npm audit fix` available, not applied. |
+| `npm run check` | **Pass.** |
+| `npm test` | **340 pass, 1 fail, 1 skipped** of 342 (about 1.2 s). After removing `open.vbs`/`open.ps1`: **341 pass, 0 fail, 1 skipped**. |
+| `bash setup.sh --dry-run` | **Pass**, run with `HOME`, `XDG_*` and `VIDEOHUB_DATA_DIR` pointed at a throwaway folder; it planned the workspace, config, Claude Code MCP registration, skill, rule, `Desktop/VideoHub.command` and example film, and wrote nothing. |
+| `node scripts/init-config.mjs --detect` (isolated) | **Pass.** `{"available":["videotoolbox","x264"],"best":"videotoolbox","gpus":[]}` |
+| `platform.findBrowser()` / `findTool()` | Chrome, `/opt/homebrew/bin/ffmpeg` and `/opt/homebrew/bin/ffprobe` resolved correctly. |
+
+All macOS-specific suites passed, including `server/platform.darwin.test.js`.
+
+### Failure: `scripts/windows-safety.test.js`, "Windows clickable lifecycle entry points invoke Node directly without policy overrides"
+The test requires `open.vbs` and `open.ps1` to be absent. Both are still tracked (last touched by browser uploads `3e9b9cd` and `192239f`). This is a repository-content problem, not an Apple Silicon problem: these legacy Windows launchers were retired upstream but the upload never deleted them. **Fixed** on `feature/macos-desktop` by removing both files (approved by the owner). `open.vbs` also contained a forbidden `-ExecutionPolicy Bypass`.
+
+### Skipped
+"Windows agent batch shims preserve special path characters..." is Windows-only (`# Windows batch execution`). Expected on macOS.
+
+### Other observations
+- **No `.gitignore` or `.github/`.** Browser upload can't carry dot-prefixed files, so `node_modules/` and `.test-tmp/` show as untracked after testing. `scripts/upload-rules.test.js` also fails if any extra dot-folder exists in the checkout. Add a `.gitignore` through git, not browser upload.
+- `gpus` is empty on Apple Silicon (expected: no discrete GPU list). VideoToolbox detection doesn't depend on it.
+- `claude` and `opencode` CLIs are not on `PATH` (Claude Code runs inside the desktop app). A real setup would fall back to editing `~/.claude.json`. Settle this before A3.
+
+## Not yet verified (requires the live hub)
+Example-film live preview, frame notes, full MP4 with audio, partial re-render and actual VideoToolbox encoding. See the plan below.
+
+## Next: live preview and render acceptance plan (isolated)
+All steps use a scratch copy and test hub, never a real install or `~/Documents/VideoHub`:
+```bash
+export VH=$PWD/.test-tmp/a0-live
+mkdir -p "$VH" && cp -R examples/hello-film "$VH/films-hello-film"
+export VIDEOHUB_PORT=7799 VIDEOHUB_DATA_DIR="$VH/data" VIDEOHUB_BASE_DIR="$VH" VIDEOHUB_GUARD=off
+```
+1. **Hub startup.** `npm start` with the vars above (jobs on, no window). Confirm `http://127.0.0.1:7799` responds, loopback only, and `node server/cli.js hub_workspace` (same port) reports the scratch workspace.
+2. **Live preview.** Open the example through `hub_live` in Chrome. Owner watches: canvas animation, timing, audio playback in the preview.
+3. **Frame notes.** Owner leaves notes on two frames; confirm they persist in `$VH/data` and come back through `hub_project`/notes tools.
+4. **Example audio.** Confirm `examples/hello-film/make-audio.js` output and the `audio/` assets load in preview.
+5. **Full render (only after the owner approves the preview).** Queue one render through the hub. Confirm the MP4 plays, has an AAC audio track (`ffprobe`), and that the job log shows `h264_videotoolbox`. Record render time and compare with `x264`.
+6. **Partial re-render.** Change one scene, re-render only that range, confirm the splice is frame-accurate and audio stays in sync.
+7. **Cancel and cleanup.** Cancel a render mid-way; confirm no orphan Chrome or FFmpeg processes and that temp files are cleaned up.
+8. Record results here as "A0 run 2".
